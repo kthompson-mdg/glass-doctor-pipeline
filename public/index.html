@@ -746,53 +746,47 @@ let tempRisks = [];
 let tempMilestones = [];
 let dateRange = { from: null, to: null };
 
-// ===== PERSISTENCE =====
-function loadData() {
+// ===== PERSISTENCE (Server API) =====
+async function loadData() {
   try {
-    const d = localStorage.getItem('gd_crm_v4');
-    if (d) { allDeals = JSON.parse(d); }
-    if (!allDeals || typeof allDeals !== 'object') allDeals = {};
-  } catch(e) { allDeals = {}; }
-  LOCATIONS.forEach(loc => { if (!allDeals[loc]) allDeals[loc] = []; });
-  // Migrate v3 data
-  try {
-    if (!localStorage.getItem('gd_crm_v4') && localStorage.getItem('gd_crm_v3')) {
-      const old = JSON.parse(localStorage.getItem('gd_crm_v3'));
-      LOCATIONS.forEach(loc => {
-        if (old[loc]) {
-          allDeals[loc] = old[loc].map(d => ({
-            ...d,
-            gcCompany: d.gcCompany || '',
-            serviceTitanJob: d.serviceTitanJob || '',
-            marginTarget: d.marginTarget || '',
-            projectManager: d.projectManager || '',
-            foreman: d.foreman || '',
-            estimator: d.estimator || '',
-            dispatcher: d.dispatcher || '',
-            laborBudget: d.laborBudget || '',
-            laborActual: d.laborActual || '',
-            preConstruction: d.preConstruction || {},
-            installReadiness: d.installReadiness || {},
-            qcChecklist: d.qcChecklist || {},
-            closeoutChecklist: d.closeoutChecklist || {},
-            procurement: d.procurement || {},
-            submittals: d.submittals || [],
-            changeOrders: d.changeOrders || [],
-            risks: d.risks || [],
-            milestones: d.milestones || []
-          }));
-        }
-      });
-      saveData();
+    const res = await fetch('/api/export');
+    if (res.ok) {
+      const data = await res.json();
+      allDeals = data;
     }
-  } catch(e) {}
+  } catch(e) {
+    console.warn('Server fetch failed, falling back to localStorage');
+    try {
+      const d = localStorage.getItem('gd_crm_v4');
+      if (d) { allDeals = JSON.parse(d); }
+    } catch(e2) {}
+  }
+  if (!allDeals || typeof allDeals !== 'object') allDeals = {};
+  LOCATIONS.forEach(loc => { if (!allDeals[loc]) allDeals[loc] = []; });
 }
-function saveData() { localStorage.setItem('gd_crm_v4', JSON.stringify(allDeals)); }
+
+async function saveData() {
+  try { localStorage.setItem('gd_crm_v4', JSON.stringify(allDeals)); } catch(e) {}
+  try {
+    await fetch('/api/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(allDeals)
+    });
+  } catch(e) { console.warn('Server sync failed:', e); }
+}
+
+async function deleteDealFromServer(id) {
+  try {
+    await fetch('/api/deals/' + id, { method: 'DELETE' });
+  } catch(e) { console.warn('Server delete failed:', e); }
+}
+
 function getDeals() { return allDeals[currentLocation] || []; }
 
 // ===== INIT =====
-function init() {
-  loadData();
+async function init() {
+  await loadData();
   populateStageDropdowns();
   setDateRange('all');
   if (getDeals().length === 0 && (!allDeals.houston || allDeals.houston.length === 0)) loadSampleData();
@@ -1159,7 +1153,7 @@ function renderAllTabs() {
 
 function closeModal() { document.getElementById('dealModal').classList.remove('open'); currentDealId = null; }
 
-function saveDeal() {
+async function saveDeal() {
   const name = document.getElementById('f-projectName').value.trim();
   if (!name) { showToast('Project name is required'); return; }
   const data = {};
@@ -1196,14 +1190,15 @@ function saveDeal() {
     data.createdAt = new Date().toISOString();
     allDeals[targetLoc].push(data);
   }
-  saveData(); closeModal(); renderAll();
+  await saveData(); closeModal(); renderAll();
   showToast('Opportunity saved');
 }
 
-function deleteDeal() {
+async function deleteDeal() {
   if (!currentDealId || !confirm('Delete this opportunity? This cannot be undone.')) return;
+  deleteDealFromServer(currentDealId);
   allDeals[currentLocation] = allDeals[currentLocation].filter(d => d.id !== currentDealId);
-  saveData(); closeModal(); renderAll();
+  await saveData(); closeModal(); renderAll();
   showToast('Opportunity deleted');
 }
 
@@ -1402,7 +1397,7 @@ function renderFiles() {
 function handleFileSelect(e) {
   Array.from(e.target.files).forEach(file => {
     const reader = new FileReader();
-    reader.onload = function(ev) { tempFiles.push({ name: file.name, size: formatFileSize(file.size), data: ev.target.result }); renderFiles(); };
+    reader.onload = async function(ev) { tempFiles.push({ name: file.name, size: formatFileSize(file.size), data: ev.target.result }); renderFiles(); };
     reader.readAsDataURL(file);
   });
   e.target.value = '';
@@ -1427,8 +1422,10 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ===== EXPORT/IMPORT =====
-function exportData() {
-  const blob = new Blob([JSON.stringify(allDeals,null,2)], {type:'application/json'});
+async function exportData() {
+  let exportObj = allDeals;
+  try { const r = await fetch('/api/export'); if (r.ok) exportObj = await r.json(); } catch(e) {}
+  const blob = new Blob([JSON.stringify(exportObj,null,2)], {type:'application/json'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = 'glass-doctor-pipeline-'+new Date().toISOString().slice(0,10)+'.json';
@@ -1441,7 +1438,7 @@ function importData(e) {
   reader.onload = function(ev) {
     try {
       const imported = JSON.parse(ev.target.result);
-      if (confirm('Import data? This replaces current data.')) {
+      if (confirm('Import data? This replaces current data for all users.')) {
         allDeals = imported;
         LOCATIONS.forEach(loc => { if (!allDeals[loc]) allDeals[loc] = []; });
         saveData(); renderAll();
